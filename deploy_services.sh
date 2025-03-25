@@ -1,210 +1,537 @@
-#!/usr/bin/env bash
-################################################################################
-# Script de despliegue automático de servicios en Linux:
-#   - Evita Ctrl + C, Ctrl + \ y Ctrl + Z
-#   - Verifica privilegios de root
-#   - Pregunta si se purgan servicios ya instalados
-#   - Solicita un nombre de dominio DNS para la configuración de BIND
-#   - Detecta la IP actual del servidor y la utiliza en la zona DNS
-#   - Instala y configura:
-#       * Servidor NFS
-#       * SSHFS (cliente)
-#       * Servidor FTP (vsftpd)
-#       * Servidor WEB (Apache)
-#       * DNS con BIND9 (con la zona del dominio solicitado)
-#       * Certificado autofirmado HTTPS (opcional)
-#
-# Probado en entornos Debian/Ubuntu. Ajustar según la distribución.
-################################################################################
+#!/bin/bash
 
-###############################################################################
-# 1. Evitar salir con Ctrl + C, Ctrl + \ y Ctrl + Z
-###############################################################################
-trap '' SIGINT   # Ctrl + C
-trap '' SIGQUIT  # Ctrl + \
-trap '' SIGTSTP  # Ctrl + Z
+# Script de Configuración de Servidor Linux Ubuntu 24.04
+# Autor: Asistente Claude
+# Fecha: Marzo 2024
 
-###############################################################################
-# 2. Verificar privilegios (root/sudo)
-###############################################################################
-if [ "$(id -u)" -ne 0 ]; then
-  echo "Este script debe ejecutarse como root. Usa sudo o inicia sesión como root."
-  exit 1
-fi
+# Variables globales para registro de log
+LOG_FILE="/var/log/server_setup.log"
+INICIO=$(date +"%Y-%m-%d %H:%M:%S")
 
-###############################################################################
-# 3. Ofrecer purgar servicios antes de la instalación
-###############################################################################
-read -r -p "¿Deseas purgar NFS/FTP/Apache/BIND9 antes de instalar? (S/n): " PURGAR
-if [[ "$PURGAR" =~ ^[Ss]$ ]]; then
-    echo "Purgando servicios anteriores..."
-    apt-get purge -y nfs-kernel-server vsftpd apache2 bind9
-    apt-get autoremove -y
-    apt-get autoclean
-    echo "Paquetes y configuraciones relacionadas purgadas."
-else
-    echo "ADVERTENCIA: Podrían quedar configuraciones previas."
-    read -r -p "¿Estás seguro de continuar sin purgar? (S/n): " CONTINUAR
-    if [[ ! "$CONTINUAR" =~ ^[Ss]$ ]]; then
-        echo "Saliendo del script..."
-        exit 1
+# Función de registro de log
+log() {
+    echo "[$(date +"%Y-%m-%d %H:%M:%S")] $*" | tee -a "$LOG_FILE"
+}
+
+# Función de manejo de errores
+error_handler() {
+    local linea=$1
+    local comando=$2
+    log "ERROR: Comando '$comando' falló en la línea $linea"
+    
+    # Enviar notificación por correo (requiere configuración de postfix)
+    echo "Error durante la configuración del servidor" | mail -s "Instalación de Servidor - Error" root
+    
+    exit 1
+}
+
+# Trap para capturar errores
+trap 'error_handler $LINENO "$BASH_COMMAND"' ERR
+
+# Función para mostrar mensaje de bienvenida
+mostrar_bienvenida() {
+    echo "==============================================="
+    echo "   Script de Configuración de Servidor Linux   "
+    echo "==============================================="
+}
+
+# Función para purgar paquetes
+purgar_paquetes() {
+    read -p "¿Desea realizar una purga completa de paquetes? (s/n): " purgar_resp
+
+    if [[ "$purgar_resp" =~ ^[Ss]$ ]]; then
+        log "Purgando paquetes instalados..."
+        
+        # Servicios a purgar
+        servicios_a_purgar=(
+            "apache2"
+            "vsftpd"
+            "nfs-kernel-server"
+            "bind9"
+            "sshfs"
+        )
+
+        for servicio in "${servicios_a_purgar[@]}"; do
+            log "Purgando $servicio..."
+            systemctl stop "$servicio" 2>/dev/null
+            apt-get purge -y "$servicio"*
+        done
+
+        # Limpiar paquetes huérfanos
+        apt-get autoremove -y
+        apt-get autoclean
+
+        log "Purga de paquetes completada."
+    else
+        log "Continuando sin purgar paquetes."
     fi
-    echo "Continuando sin purgar servicios..."
-fi
+}
 
-###############################################################################
-# 4. Pedir nombre de dominio DNS
-###############################################################################
-read -r -p "Introduce el nombre de dominio que deseas configurar (ej. example.local): " DOMINIO
-if [ -z "$DOMINIO" ]; then
-  DOMINIO="example.local"
-  echo "No se introdujo un dominio. Se usará '$DOMINIO' por defecto."
-fi
+# Función para verificar requisitos del sistema
+verificar_requisitos() {
+    log "Verificando requisitos del sistema..."
+    
+    # Verificar versión de Ubuntu
+    . /etc/os-release
+    if [[ "$VERSION_CODENAME" != "noble" ]]; then
+        log "ADVERTENCIA: Este script está optimizado para Ubuntu 24.04 (Noble Numbat)"
+    fi
 
-###############################################################################
-# Obtener la IP actual del servidor para usarla en el DNS
-###############################################################################
-HOST_IP=$(hostname -I | awk '{print $1}')
-if [ -z "$HOST_IP" ]; then
-  # Fallback, en caso de no detectar IP con hostname -I
-  HOST_IP="127.0.0.1"
-fi
-echo "IP detectada: $HOST_IP"
+    # Verificar espacio en disco
+    ESPACIO_DISPONIBLE=$(df -h / | awk '/\// {print $4}' | sed 's/G//')
+    if (( $(echo "$ESPACIO_DISPONIBLE < 10" | bc -l) )); then
+        log "ADVERTENCIA: Espacio en disco bajo. Se recomienda al menos 10GB libres."
+    fi
 
-###############################################################################
-# 5. Actualizar repositorios e instalar paquetes básicos
-###############################################################################
-echo "=== Actualizando repositorios e instalando paquetes base ==="
-apt-get update -y
-apt-get upgrade -y
-apt-get install -y git curl wget
+    # Verificar RAM
+    MEMORIA_TOTAL=$(free -g | awk '/^Mem:/ {print $2}')
+    if (( MEMORIA_TOTAL < 2 )); then
+        log "ADVERTENCIA: Memoria RAM baja. Se recomiendan al menos 2GB."
+    fi
+}
 
-###############################################################################
-# 6. Instalar y configurar Servidor NFS
-###############################################################################
-echo "=== Instalando y configurando NFS Server ==="
-apt-get install -y nfs-kernel-server
+# Función para solicitar configuración personalizada
+solicitar_configuracion() {
+    # Solicitar nombre de dominio DNS
+    while true; do
+        read -p "Introduce el nombre de dominio DNS (ej: midominio.local): " DOMINIO_DNS
+        if [[ -n "$DOMINIO_DNS" ]]; then
+            break
+        else
+            echo "El nombre de dominio no puede estar vacío."
+        fi
+    done
 
-read -r -p "Introduce la red que puede acceder a NFS (ej. 192.168.1.0/24): " NFS_RED
-if [ -z "$NFS_RED" ]; then
-  NFS_RED="192.168.1.0/24"
-  echo "No se introdujo una red, se usará '$NFS_RED' por defecto."
-fi
+    # Solicitar contenido de página web
+    read -p "Introduce el título para tu página web: " TITULO_WEB
+    TITULO_WEB="${TITULO_WEB:-Bienvenido a mi Servidor}"
 
-NFS_DIR="/srv/nfs_share"
-mkdir -p "${NFS_DIR}"
-chown nobody:nogroup "${NFS_DIR}"
-chmod 777 "${NFS_DIR}"
-echo "${NFS_DIR}  ${NFS_RED}(rw,sync,no_subtree_check)" >> /etc/exports
-exportfs -ra
-systemctl enable nfs-kernel-server
-systemctl restart nfs-kernel-server
-echo "NFS configurado. Carpeta exportada: ${NFS_DIR} (acceso desde ${NFS_RED})"
+    read -p "Introduce un mensaje de bienvenida para tu página web: " MENSAJE_WEB
+    MENSAJE_WEB="${MENSAJE_WEB:-Este es mi nuevo servidor Linux}"
+}
 
-###############################################################################
-# 7. Instalar SSHFS (para pruebas)
-###############################################################################
-echo "=== Instalando SSHFS (cliente) ==="
-apt-get install -y sshfs
-echo "SSHFS instalado. Para usarlo: sshfs usuario@host_remoto:/ruta /punto/de/montaje"
+# Función de menú de configuración avanzada
+menu_configuracion_avanzada() {
+    while true; do
+        clear
+        echo "===== Configuración Avanzada de Servidor ====="
+        echo "1. Configurar IP estática"
+        echo "2. Configurar servidor de seguridad adicional (fail2ban)"
+        echo "3. Instalar herramientas de monitoreo"
+        echo "4. Configurar backup automático"
+        echo "5. Continuar con instalación estándar"
+        
+        read -p "Seleccione una opción (1-5): " opcion_avanzada
+        
+        case $opcion_avanzada in
+            1) configurar_ip_estatica ;;
+            2) configurar_fail2ban ;;
+            3) instalar_monitoreo ;;
+            4) configurar_backup ;;
+            5) break ;;
+            *) echo "Opción inválida. Presione Enter para continuar."; read ;;
+        esac
+    done
+}
 
-###############################################################################
-# 8. Instalar y configurar Servidor FTP (vsftpd)
-###############################################################################
-echo "=== Instalando y configurando vsftpd (FTP) ==="
-apt-get install -y vsftpd
-cp /etc/vsftpd.conf /etc/vsftpd.conf.bak
-sed -i 's/^#write_enable=YES/write_enable=YES/' /etc/vsftpd.conf
-sed -i 's/^#chroot_local_user=YES/chroot_local_user=YES/' /etc/vsftpd.conf
-sed -i 's/^anonymous_enable=YES/anonymous_enable=NO/' /etc/vsftpd.conf
-systemctl enable vsftpd
-systemctl restart vsftpd
-echo "vsftpd instalado y configurado."
+# Configuración de IP estática
+configurar_ip_estatica() {
+    read -p "Introduce la dirección IP estática: " IP_ESTATICA
+    read -p "Introduce la máscara de subred (ej. 24): " MASCARA
+    read -p "Introduce la puerta de enlace: " GATEWAY
 
-###############################################################################
-# 9. Instalar y configurar Servidor Web Apache
-###############################################################################
-echo "=== Instalando y configurando Apache ==="
-apt-get install -y apache2
-systemctl enable apache2
-systemctl start apache2
-echo "<h1>Servidor Apache funcionando con dominio: $DOMINIO</h1>" > /var/www/html/index.html
+    # Crear configuración de netplan
+    cat > /etc/netplan/01-netcfg.yaml << EOL
+network:
+  version: 2
+  renderer: networkd
+  ethernets:
+    eth0:
+      addresses:
+        - ${IP_ESTATICA}/${MASCARA}
+      routes:
+        - to: default
+          via: ${GATEWAY}
+      nameservers:
+        addresses: [8.8.8.8, 1.1.1.1]
+EOL
 
-###############################################################################
-# 10. Instalar y configurar DNS con BIND9
-###############################################################################
-echo "=== Instalando BIND9 (DNS) ==="
-apt-get install -y bind9
+    # Aplicar configuración
+    netplan apply
+    log "Configuración de IP estática aplicada: $IP_ESTATICA"
+}
 
-cat <<EOF >> /etc/bind/named.conf.local
+# Configuración de fail2ban
+configurar_fail2ban() {
+    apt install -y fail2ban
+    
+    # Configuración básica para SSH y Apache
+    cp /etc/fail2ban/jail.conf /etc/fail2ban/jail.local
+    sed -i 's/bantime  = 10m/bantime  = 1h/' /etc/fail2ban/jail.local
+    sed -i 's/maxretry = 5/maxretry = 3/' /etc/fail2ban/jail.local
 
-zone "$DOMINIO" {
-  type master;
-  file "/etc/bind/db.$DOMINIO";
-};
-EOF
+    systemctl restart fail2ban
+    log "Fail2ban instalado y configurado"
+}
 
-cp /etc/bind/db.local /etc/bind/db.$DOMINIO
-sed -i "s/localhost/$DOMINIO./g" /etc/bind/db.$DOMINIO
-sed -i "s/127.0.0.1/$HOST_IP/g" /etc/bind/db.$DOMINIO
-sed -i "s/::1/::1/g" /etc/bind/db.$DOMINIO
-sed -i "s/ root.$DOMINIO./ admin.$DOMINIO./" /etc/bind/db.$DOMINIO
-sed -i "s/ serial/ 2/" /etc/bind/db.$DOMINIO
-systemctl enable bind9
-systemctl restart bind9
-echo "BIND9 instalado. Zona para $DOMINIO configurada en /etc/bind/db.$DOMINIO"
-echo "Se está usando la IP $HOST_IP"
+# Instalar herramientas de monitoreo
+instalar_monitoreo() {
+    apt install -y htop glances netdata
+    
+    # Configuración básica de Netdata
+    sed -i 's/# bind to = \*/bind to = 127.0.0.1/' /etc/netdata/netdata.conf
+    systemctl restart netdata
+    
+    log "Herramientas de monitoreo instaladas: htop, glances, netdata"
+}
 
-###############################################################################
-# 11. (Opcional) Certificado autofirmado para Apache
-###############################################################################
-read -r -p "¿Deseas generar un certificado SSL autofirmado para Apache? (S/n): " GENERAR_SSL
-if [[ "$GENERAR_SSL" =~ ^[Ss]$ ]]; then
-  echo "=== Generando certificado SSL autofirmado para $DOMINIO ==="
-  apt-get install -y openssl
-  SSL_DIR="/etc/apache2/ssl"
-  mkdir -p "${SSL_DIR}"
-  openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
-    -keyout "${SSL_DIR}/selfsigned.key" \
-    -out "${SSL_DIR}/selfsigned.crt" \
-    -subj "/C=ES/ST=TuProvincia/L=TuCiudad/O=TuOrganizacion/OU=IT/CN=${DOMINIO}"
-  a2enmod ssl
-  cat <<EOF > /etc/apache2/sites-available/ssl.conf
+# Configuración de backup automático
+configurar_backup() {
+    # Crear directorio de backups
+    mkdir -p /backup
+
+    # Instalar herramienta de backup
+    apt install -y rsync
+
+    # Crear script de backup
+    cat > /usr/local/bin/backup.sh << 'EOL'
+#!/bin/bash
+BACKUP_DIR="/backup"
+TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
+
+# Backup de configuraciones críticas
+rsync -avz /etc $BACKUP_DIR/etc_backup_$TIMESTAMP
+rsync -avz /var/www $BACKUP_DIR/web_backup_$TIMESTAMP
+
+# Eliminar backups antiguos (más de 30 días)
+find $BACKUP_DIR -type d -mtime +30 -exec rm -rf {} \;
+EOL
+
+    # Hacer el script ejecutable
+    chmod +x /usr/local/bin/backup.sh
+
+    # Configurar cron para backup diario
+    (crontab -l 2>/dev/null; echo "0 3 * * * /usr/local/bin/backup.sh") | crontab -
+
+    log "Configuración de backup automático completada"
+}
+
+# Actualizar sistema
+update_system() {
+    log "Actualizando sistema..."
+    apt update && apt upgrade -y
+    apt install -y software-properties-common
+}
+
+# Configurar Firewall (UFW)
+configurar_firewall() {
+    log "Configurando Firewall UFW..."
+    ufw enable
+    ufw default deny incoming
+    ufw default allow outgoing
+}
+
+# Configurar Servidor NFS
+configurar_nfs() {
+    log "Instalando y configurando Servidor NFS..."
+    
+    # Instalar paquetes NFS
+    apt install -y nfs-kernel-server
+
+    # Crear directorio para compartir
+    mkdir -p /export/shared
+    
+    # Configurar permisos
+    chown nobody:nogroup /export/shared
+    chmod 755 /export/shared
+
+    # Configurar exports
+    echo "/export/shared *(rw,sync,no_subtree_check,no_root_squash)" >> /etc/exports
+
+    # Reiniciar servicio NFS
+    systemctl restart nfs-kernel-server
+    systemctl enable nfs-kernel-server
+
+    # Configurar firewall para NFS
+    ufw allow from any to any port 2049
+}
+
+# Configurar SSHFS y Servidor FTP
+configurar_ssh_ftp() {
+    log "Instalando SSHFS y Servidor FTP (vsftpd)..."
+    
+    # Instalar SSHFS y vsftpd
+    apt install -y sshfs vsftpd
+
+    # Configuración de vsftpd
+    sed -i 's/anonymous_enable=YES/anonymous_enable=NO/' /etc/vsftpd.conf
+    sed -i 's/#local_enable=YES/local_enable=YES/' /etc/vsftpd.conf
+    sed -i 's/#write_enable=YES/write_enable=YES/' /etc/vsftpd.conf
+
+    # Reiniciar servicios
+    systemctl restart vsftpd
+    systemctl enable vsftpd
+
+    # Configurar firewall
+    ufw allow 20/tcp  # FTP datos
+    ufw allow 21/tcp  # FTP control
+}
+
+# Configurar Servidor Web Apache
+configurar_apache() {
+    log "Instalando y configurando Apache..."
+    
+    # Instalar Apache y módulos
+    apt install -y apache2 apache2-utils
+
+    # Generar certificado autofirmado
+    openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+        -keyout /etc/ssl/private/apache-selfsigned.key \
+        -out /etc/ssl/certs/apache-selfsigned.crt \
+        -subj "/C=ES/ST=MiEstado/L=MiCiudad/O=MiOrganizacion/OU=MiUnidad/CN=$DOMINIO_DNS"
+
+    # Habilitar módulos SSL
+    a2enmod ssl
+    a2enmod rewrite
+
+    # Configuración básica de sitio HTTPS
+    cat > /etc/apache2/sites-available/default-ssl.conf << EOL
 <VirtualHost *:443>
-    ServerAdmin admin@$DOMINIO
-    ServerName $DOMINIO
+    ServerAdmin webmaster@localhost
     DocumentRoot /var/www/html
-
+    ServerName ${DOMINIO_DNS}
+    
     SSLEngine on
-    SSLCertificateFile    ${SSL_DIR}/selfsigned.crt
-    SSLCertificateKeyFile ${SSL_DIR}/selfsigned.key
-
-    <FilesMatch "\.(cgi|shtml|phtml|php)$">
-        SSLOptions +StdEnvVars
-    </FilesMatch>
-    <Directory /usr/lib/cgi-bin>
-        SSLOptions +StdEnvVars
-    </Directory>
-
-    ErrorLog \${APACHE_LOG_DIR}/ssl_error.log
-    CustomLog \${APACHE_LOG_DIR}/ssl_access.log combined
+    SSLCertificateFile /etc/ssl/certs/apache-selfsigned.crt
+    SSLCertificateKeyFile /etc/ssl/private/apache-selfsigned.key
 </VirtualHost>
-EOF
-  a2ensite ssl.conf
-  systemctl restart apache2
-  echo "Certificado SSL autofirmado configurado. Puedes acceder a https://$DOMINIO"
-else
-  echo "No se generará certificado SSL, se continuará con HTTP."
-fi
+EOL
 
-###############################################################################
-# 12. Final
-###############################################################################
-echo "========================================================================="
-echo "FIN DEL SCRIPT: Servicios instalados y configurados."
-echo "- NFS: carpeta exportada en ${NFS_DIR} para la red ${NFS_RED}"
-echo "- SSHFS instalado."
-echo "- vsftpd, Apache y BIND9 configurados."
-echo "- Dominio DNS: $DOMINIO resolviendo a $HOST_IP"
-echo "- Si has generado certificado, HTTPS activo en puerto 443."
-echo "========================================================================="
+    # Habilitar sitio SSL
+    a2ensite default-ssl
+
+    # Reiniciar Apache
+    systemctl restart apache2
+    systemctl enable apache2
+
+    # Configurar firewall
+    ufw allow 'Apache Full'
+}
+
+# Configurar DNS (Bind9)
+configurar_dns() {
+    log "Instalando y configurando Servidor DNS Bind9..."
+    
+    # Instalar Bind9
+    apt install -y bind9 bind9utils bind9-doc
+
+    # Definir variables de configuración DNS
+    local DOMINIO="$DOMINIO_DNS"
+    local NETWORK="10.0.0"  # Red de ejemplo, ajustar según necesidad
+    local REVERSE_ZONE="0.0.10.in-addr.arpa"
+
+    # Configuración avanzada de named.conf.local
+    cat > /etc/bind/named.conf.local << EOL
+// Configuración de zonas para $DOMINIO
+
+// Zona directa
+zone "${DOMINIO}" IN {
+    type master;
+    file "/etc/bind/zones/db.${DOMINIO}";
+    allow-update { none; };
+};
+
+// Zona inversa
+zone "${REVERSE_ZONE}" IN {
+    type master;
+    file "/etc/bind/zones/db.${NETWORK}.rev";
+    allow-update { none; };
+};
+EOL
+
+    # Crear directorio para archivos de zona
+    mkdir -p /etc/bind/zones
+
+    # Configuración de zona directa
+    cat > "/etc/bind/zones/db.${DOMINIO}" << EOL
+\$TTL    86400
+@       IN      SOA     ns1.${DOMINIO}. admin.${DOMINIO}. (
+                  $(date +%Y%m%d%H)  ; Serial
+             86400     ; Refresh
+              3600     ; Retry
+            2419200    ; Expire
+              86400 )  ; Negative Cache TTL
+
+; Servidores de nombres
+@       IN      NS      ns1.${DOMINIO}.
+
+; Definición de registros
+ns1     IN      A       127.0.0.1
+www     IN      A       127.0.0.1
+@       IN      A       127.0.0.1
+EOL
+
+    # Configuración de zona inversa
+    cat > "/etc/bind/zones/db.${NETWORK}.rev" << EOL
+\$TTL    86400
+@       IN      SOA     ns1.${DOMINIO}. admin.${DOMINIO}. (
+                  $(date +%Y%m%d%H)  ; Serial
+             86400     ; Refresh
+              3600     ; Retry
+            2419200    ; Expire
+              86400 )  ; Negative Cache TTL
+
+; Servidores de nombres
+@       IN      NS      ns1.${DOMINIO}.
+
+; Mapeo de IP a nombre
+1       IN      PTR     ns1.${DOMINIO}.
+EOL
+
+    # Configuración de named.conf.options con más seguridad
+    cat > /etc/bind/named.conf.options << EOL
+options {
+    directory "/var/cache/bind";
+    
+    // Restringir recursión y consultas
+    recursion yes;
+    allow-recursion { 
+        localhost; 
+        localnets; 
+    };
+    
+    // Servidores de reenvío
+    forwarders {
+        8.8.8.8;
+        1.1.1.1;
+    };
+    
+    // Mejoras de seguridad
+    dnssec-validation auto;
+    auth-nxdomain no;    # Cumplir con RFC1035
+    listen-on-v6 { any; };
+    
+    // Prevenir DNS amplification attacks
+    rate-limit {
+        responses-per-second 10;
+    };
+};
+EOL
+
+    # Configurar permisos
+    chown -R bind:bind /etc/bind/zones
+    chmod 644 /etc/bind/zones/*
+
+    # Validar configuración
+    named-checkconf /etc/bind/named.conf
+    named-checkzone "$DOMINIO" "/etc/bind/zones/db.${DOMINIO}"
+    named-checkzone "$REVERSE_ZONE" "/etc/bind/zones/db.${NETWORK}.rev"
+
+    # Reiniciar servicio DNS
+    systemctl restart named
+    systemctl enable named
+
+    # Configurar firewall
+    ufw allow 53/tcp
+    ufw allow 53/udp
+
+    log "Configuración de DNS completada para $DOMINIO"
+}
+
+# Crear página web personalizada
+crear_pagina_web() {
+    cat > /var/www/html/index.html << EOL
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <title>${TITULO_WEB}</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f4f4f4;
+            text-align: center;
+        }
+        h1 {
+            color: #333;
+        }
+        p {
+            color: #666;
+        }
+    </style>
+</head>
+<body>
+    <h1>${TITULO_WEB}</h1>
+    <p>${MENSAJE_WEB}</p>
+    <footer>
+        <small>Servidor configurado automáticamente</small>
+    </footer>
+</body>
+</html>
+EOL
+}
+
+# Función para reiniciar servicios
+reiniciar_servicios() {
+    log "Reiniciando todos los servicios instalados..."
+    
+    # Servicios a reiniciar
+    servicios=(
+        "nfs-kernel-server"
+        "vsftpd"
+        "apache2"
+        "named"
+        "fail2ban"
+        "netdata"
+    )
+
+    for servicio in "${servicios[@]}"; do
+        if systemctl is-active --quiet "$servicio"; then
+            systemctl restart "$servicio"
+            log "Reiniciando $servicio"
+        fi
+    done
+}
+
+# Función principal
+main() {
+    # Verificar que se ejecute como root
+    if [[ $EUID -ne 0 ]]; then
+       log "Este script debe ejecutarse como root (usar sudo)" 
+       exit 1
+    fi
+
+    log "Iniciando configuración de servidor..."
+    
+    # Verificar requisitos del sistema
+    verificar_requisitos
+    
+    # Menú de configuración avanzada
+    menu_configuracion_avanzada
+
+    # Resto de la configuración...
+    mostrar_bienvenida
+    purgar_paquetes
+    solicitar_configuracion
+
+    update_system
+    configurar_firewall
+    configurar_nfs
+    configurar_ssh_ftp
+    configurar_apache
+    configurar_dns
+    crear_pagina_web
+    
+    # Añadir reinicio de servicios al final
+    reiniciar_servicios
+
+    # Finalizar instalación
+    log "Instalación completada en $INICIO"
+    echo "Instalación completada. Consulte el log en $LOG_FILE"
+}
+
+# Ejecutar instalación
+main
