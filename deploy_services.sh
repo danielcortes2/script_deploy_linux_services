@@ -322,22 +322,25 @@ EOL
 configurar_dns() {
     log "Instalando y configurando Servidor DNS Bind9..."
     
+    # Obtener IP del servidor automáticamente
+    local SERVER_IP=$(hostname -I | awk '{print $1}')
+    local OCTETOS=(${SERVER_IP//./ })
+    local NETWORK="${OCTETOS[0]}.${OCTETOS[1]}.${OCTETOS[2]}"
+    local REVERSE_ZONE="${OCTETOS[2]}.${OCTETOS[1]}.${OCTETOS[0]}.in-addr.arpa"
+
+    log "IP del servidor detectada: $SERVER_IP"
+
     # Instalar Bind9
     apt install -y bind9 bind9utils bind9-doc
 
-    # Definir variables de configuración DNS
-    local DOMINIO="$DOMINIO_DNS"
-    local NETWORK="10.0.0"  # Red de ejemplo, ajustar según necesidad
-    local REVERSE_ZONE="0.0.10.in-addr.arpa"
-
     # Configuración avanzada de named.conf.local
     cat > /etc/bind/named.conf.local << EOL
-// Configuración de zonas para $DOMINIO
+// Configuración de zonas para $DOMINIO_DNS
 
 // Zona directa
-zone "${DOMINIO}" IN {
+zone "${DOMINIO_DNS}" IN {
     type master;
-    file "/etc/bind/zones/db.${DOMINIO}";
+    file "/etc/bind/zones/db.${DOMINIO_DNS}";
     allow-update { none; };
 };
 
@@ -353,9 +356,9 @@ EOL
     mkdir -p /etc/bind/zones
 
     # Configuración de zona directa
-    cat > "/etc/bind/zones/db.${DOMINIO}" << EOL
+    cat > "/etc/bind/zones/db.${DOMINIO_DNS}" << EOL
 \$TTL    86400
-@       IN      SOA     ns1.${DOMINIO}. admin.${DOMINIO}. (
+@       IN      SOA     ${DOMINIO_DNS}. admin.${DOMINIO_DNS}. (
                   $(date +%Y%m%d%H)  ; Serial
              86400     ; Refresh
               3600     ; Retry
@@ -363,18 +366,20 @@ EOL
               86400 )  ; Negative Cache TTL
 
 ; Servidores de nombres
-@       IN      NS      ns1.${DOMINIO}.
+@       IN      NS      ${DOMINIO_DNS}.
 
 ; Definición de registros
-ns1     IN      A       127.0.0.1
-www     IN      A       127.0.0.1
-@       IN      A       127.0.0.1
+@       IN      A       ${SERVER_IP}
+www     IN      CNAME   @
+
+; Registros adicionales si es necesario
+$(hostname) IN A ${SERVER_IP}
 EOL
 
     # Configuración de zona inversa
     cat > "/etc/bind/zones/db.${NETWORK}.rev" << EOL
 \$TTL    86400
-@       IN      SOA     ns1.${DOMINIO}. admin.${DOMINIO}. (
+@       IN      SOA     ${DOMINIO_DNS}. admin.${DOMINIO_DNS}. (
                   $(date +%Y%m%d%H)  ; Serial
              86400     ; Refresh
               3600     ; Retry
@@ -382,10 +387,11 @@ EOL
               86400 )  ; Negative Cache TTL
 
 ; Servidores de nombres
-@       IN      NS      ns1.${DOMINIO}.
+@       IN      NS      ${DOMINIO_DNS}.
 
 ; Mapeo de IP a nombre
-1       IN      PTR     ns1.${DOMINIO}.
+${OCTETOS[3]}      IN      PTR     ${DOMINIO_DNS}.
+${OCTETOS[3]}      IN      PTR     $(hostname).${DOMINIO_DNS}.
 EOL
 
     # Configuración de named.conf.options con más seguridad
@@ -424,7 +430,7 @@ EOL
 
     # Validar configuración
     named-checkconf /etc/bind/named.conf
-    named-checkzone "$DOMINIO" "/etc/bind/zones/db.${DOMINIO}"
+    named-checkzone "$DOMINIO_DNS" "/etc/bind/zones/db.${DOMINIO_DNS}"
     named-checkzone "$REVERSE_ZONE" "/etc/bind/zones/db.${NETWORK}.rev"
 
     # Reiniciar servicio DNS
@@ -435,7 +441,7 @@ EOL
     ufw allow 53/tcp
     ufw allow 53/udp
 
-    log "Configuración de DNS completada para $DOMINIO"
+    log "Configuración de DNS completada para $DOMINIO_DNS con IP $SERVER_IP"
 }
 
 # Crear página web personalizada
