@@ -1,56 +1,69 @@
-# Script de Despliegue de Servicios Linux
+# README - Script de Despliegue de Servicios Linux
 
 ## Descripción
-Este script automatiza la configuración e instalación de varios servicios esenciales para servidores Linux, incluyendo:
-- Servicio NFS (Network File System) con configuración segura
-- SSHFS (SSH Filesystem)
-- Servidor Apache con resolución DNS 
-- Certificado HTTPS
-- Servidor FTP
 
-## Requisitos Previos
-- Sistema operativo Linux (preferiblemente distribuciones basadas en Debian/Ubuntu)
-- Acceso a sudo o como usuario root
-- Conexión a internet
-- Conocimientos básicos de administración de sistemas Linux
+Este script automatiza la configuración e instalación de varios servicios esenciales en servidores Linux, proporcionando opciones avanzadas para personalizar la configuración del sistema antes de la instalación estándar.
 
-## Configuración Inicial de Git
+## Opciones del Menú de Configuración Avanzada
 
-### Configuración de Identidad de Git
-Antes de usar el script, configura tu identidad de Git para los commits:
+### 1. Configurar IP Estática
 
-```bash
-# Establece el nombre de usuario que aparecerá en tus commits
-git config --global user.name "Tu Nombre"
+Permite establecer una dirección IP fija en el servidor en lugar de usar una asignación dinámica (DHCP). Esta co**nfiguración es opcional y sol**o está disponible si se elige esta opción en el menú. Está hecho para Ubuntu 24, probablemente si se utiliza otra distribución no funcione. Se solicitan los siguientes datos:
 
-# Establece el correo electrónico que aparecerá en tus commits
-git config --global user.email "tu_correo@example.com"
-```
+- Dirección IP
+- Máscara de subred
+- Puerta de enlace
 
-## Servicios Incluidos
+El script genera un archivo de configuración en `/etc/netplan/01-netcfg.yaml` y aplica los cambios mediante `netplan apply`.
 
-### 1. NFS (Network File System)
-- Configuración segura de compartición de archivos en red
-- Control de permisos y acceso
-- Optimización de rendimiento
+### 2. Configurar Servidor de Seguridad (fail2ban)
 
-### 2. SSHFS
-- Montaje de sistemas de archivos remotos via SSH
-- Conexiones seguras
-- Fácil acceso a directorios remotos
+Instala y configura `fail2ban`, un servicio de protección contra ataques de fuerza bruta. Los pasos son:
 
-### 3. Servidor Apache
-- Configuración de servidor web
-- Resolución DNS automática
-- Instalación de certificado HTTPS
-- Configuración de seguridad básica
+1. Instalación de `fail2ban`.
+2. Copia del archivo de configuración predeterminado a `jail.local`.
+3. Modificación de parámetros:
+   - Tiempo de baneo (`bantime`) aumentado a 1 hora.
+   - Número máximo de intentos fallidos reducido a 3.
+4. Reinicio del servicio `fail2ban` para aplicar los cambios.
 
-### 4. Servidor FTP
-- Configuración de servidor de transferencia de archivos
-- Soporte para conexiones seguras
-- Gestión de usuarios y permisos
+### 3. Instalar Herramientas de Monitoreo
 
-## Instalación
+Instala las siguientes herramientas:
+
+- **htop**: Monitor de procesos en tiempo real.
+- **glances**: Supervisión de recursos del sistema.
+- **netdata**: Panel web de monitoreo con información detallada de uso del sistema.
+
+Se configura `netdata` para que solo acepte conexiones locales por seguridad y se reinicia su servicio.
+
+### 4. Configurar Backup Automático
+
+Automatiza la creación de copias de seguridad de configuraciones críticas y archivos web:
+
+1. Crea el directorio `/backup`.
+2. Instala `rsync` para la transferencia de archivos.
+3. Genera un script en `/usr/local/bin/backup.sh` que copia:
+   - Configuraciones del sistema (`/etc`).
+   - Archivos de servidores web (`/var/www`).
+4. Configura una tarea `cron` para ejecutar el backup diariamente a las 03:00 AM.
+
+### 5. Continuar con la Instalación Estándar
+
+Si el usuario elige continuar sin opciones avanzadas, el script realiza las siguientes tareas:
+
+1. Actualiza el sistema (`apt update && apt upgrade`).
+2. Configura el firewall (`ufw`) permitiendo solo conexiones seguras.
+3. Instala y configura los siguientes servicios:
+   - **Servidor NFS**: Para compartir archivos en red.
+   - **SSHFS**: Para montaje seguro de archivos remotos.
+   - **Servidor Apache**: Configura un servidor web con soporte para HTTPS.
+   - **Servidor FTP**: Configura `vsftpd` para transferencia segura de archivos.
+4. Reinicia los servicios y verifica su estado.
+
+## Instalación y Uso
+
+Para utilizar el script, sigue estos pasos:
 
 ```bash
 # Clonar el repositorio
@@ -66,22 +79,16 @@ chmod +x script_instalacion.sh
 sudo ./script_instalacion.sh
 ```
 
-## Personalización
-Antes de ejecutar el script, revisa y modifica los siguientes archivos de configuración según tus necesidades:
-- `config/nfs_config.conf`
-- `config/apache_config.conf`
-- `config/ftp_config.conf`
+## Requisitos
 
-## Seguridad
-- Utiliza contraseñas seguras
-- Configura firewalls
-- Mantén el sistema actualizado
-- Revisa y ajusta los permisos de acceso
+- Sistema Linux basado en Debian (preferiblemente Ubuntu 24.04).
+- Acceso como usuario `root` o permisos `sudo`.
+- Conexión a internet estable.
 
-## Solución de Problemas
-- Verifica los logs de sistema en `/var/log/`
-- Comprueba la configuración de los servicios
-- Asegúrate de tener los permisos necesarios
+## Notas Adicionales
 
-## Contribuciones
-Las contribuciones son bienvenidas. Por favor, abre un issue o envía un pull request.
+- Se recomienda revisar los archivos de configuración generados antes de reiniciar el sistema.
+- Los logs del proceso se almacenan en `/var/log/server_setup.log`.
+
+Este script proporciona una solución automatizada para la configuración inicial de servidores Linux, permitiendo personalización avanzada y seguridad desde el inicio.
+
