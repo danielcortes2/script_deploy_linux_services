@@ -1,8 +1,6 @@
 #!/bin/bash
 
 # Script de Configuración de Servidor Linux Ubuntu 24.04
-# Autor: Asistente Claude
-# Fecha: Marzo 2024
 
 # Variables globales para registro de log
 LOG_FILE="/var/log/server_setup.log"
@@ -110,55 +108,92 @@ solicitar_configuracion() {
     MENSAJE_WEB="${MENSAJE_WEB:-Este es mi nuevo servidor Linux}"
 }
 
+# Nueva función para instalar paquetes adicionales
+instalar_paquetes_adicionales() {
+    log "Instalando paquetes adicionales..."
+    
+    # Añadir repositorio para Visual Studio Code
+    if ! grep -q "packages.microsoft.com/repos/code" /etc/apt/sources.list.d/*.list 2>/dev/null; then
+        log "Añadiendo repositorio de Visual Studio Code..."
+        wget -qO- https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor > packages.microsoft.gpg
+        sudo install -D -o root -g root -m 644 packages.microsoft.gpg /etc/apt/keyrings/packages.microsoft.gpg
+        sudo sh -c 'echo "deb [arch=amd64,arm64,armhf signed-by=/etc/apt/keyrings/packages.microsoft.gpg] https://packages.microsoft.com/repos/code stable main" > /etc/apt/sources.list.d/vscode.list'
+        rm -f packages.microsoft.gpg
+        apt update
+    fi
+    
+    # Paquetes a instalar
+    log "Instalando micro, Visual Studio Code, tree, neofetch, htop y ncdu..."
+    apt install -y micro code tree neofetch htop ncdu
+    
+    # Verificar instalación
+    paquetes_instalados=()
+    for paquete in micro code tree neofetch htop ncdu; do
+        if dpkg -l | grep -q $paquete; then
+            paquetes_instalados+=("$paquete")
+        else
+            log "ADVERTENCIA: No se pudo instalar $paquete"
+        fi
+    done
+    
+    log "Paquetes instalados correctamente: ${paquetes_instalados[*]}"
+    echo "Paquetes adicionales instalados. Presione Enter para continuar."
+    read
+}
+
+# Función para instalar y configurar SSH
+instalar_configurar_ssh() {
+    log "Instalando y configurando servidor SSH..."
+    
+    # Instalar servidor SSH
+    apt install -y openssh-server
+    
+    # Hacer copia de seguridad del archivo de configuración original
+    cp /etc/ssh/sshd_config /etc/ssh/sshd_config.backup
+    
+    # Configuraciones de seguridad básicas
+    sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin no/' /etc/ssh/sshd_config
+    sed -i 's/#MaxAuthTries 6/MaxAuthTries 3/' /etc/ssh/sshd_config
+    sed -i 's/#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config
+    
+    # Reiniciar servicio SSH
+    systemctl restart ssh
+    systemctl enable ssh
+    
+    # Configurar firewall para SSH
+    ufw allow ssh
+    
+    log "Servidor SSH instalado y configurado"
+    echo "Servidor SSH instalado y configurado. Presione Enter para continuar."
+    read
+}
+
 # Función de menú de configuración avanzada
 menu_configuracion_avanzada() {
     while true; do
         clear
         echo "===== Configuración Avanzada de Servidor ====="
-        echo "1. Configurar IP estática"
+        echo "1. Instalar Paquetes Adicionales"
         echo "2. Configurar servidor de seguridad adicional (fail2ban)"
         echo "3. Instalar herramientas de monitoreo"
         echo "4. Configurar backup automático"
-        echo "5. Continuar con instalación estándar"
+        echo "5. Instalar y configurar SSH"
+        echo "6. Continuar con instalación estándar"
+        echo "7. Salir del menú"
         
-        read -p "Seleccione una opción (1-5): " opcion_avanzada
+        read -p "Seleccione una opción (1-7): " opcion_avanzada
         
         case $opcion_avanzada in
-            1) configurar_ip_estatica ;;
+            1) instalar_paquetes_adicionales ;;
             2) configurar_fail2ban ;;
             3) instalar_monitoreo ;;
             4) configurar_backup ;;
-            5) break ;;
+            5) instalar_configurar_ssh ;;
+            6) break ;;
+            7) echo "Saliendo del menú de configuración avanzada..."; exit 0 ;;
             *) echo "Opción inválida. Presione Enter para continuar."; read ;;
         esac
     done
-}
-
-# Configuración de IP estática
-configurar_ip_estatica() {
-    read -p "Introduce la dirección IP estática: " IP_ESTATICA
-    read -p "Introduce la máscara de subred (ej. 24): " MASCARA
-    read -p "Introduce la puerta de enlace: " GATEWAY
-
-    # Crear configuración de netplan
-    cat > /etc/netplan/01-netcfg.yaml << EOL
-network:
-  version: 2
-  renderer: networkd
-  ethernets:
-    eth0:
-      addresses:
-        - ${IP_ESTATICA}/${MASCARA}
-      routes:
-        - to: default
-          via: ${GATEWAY}
-      nameservers:
-        addresses: [8.8.8.8, 1.1.1.1]
-EOL
-
-    # Aplicar configuración
-    netplan apply
-    log "Configuración de IP estática aplicada: $IP_ESTATICA"
 }
 
 # Configuración de fail2ban
@@ -492,6 +527,7 @@ reiniciar_servicios() {
         "named"
         "fail2ban"
         "netdata"
+        "ssh"
     )
 
     for servicio in "${servicios[@]}"; do
