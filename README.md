@@ -8,13 +8,15 @@ Este script automatiza la configuración e instalación de varios servicios esen
 
 ### 1. Configurar IP Estática
 
-Permite establecer una dirección IP fija en el servidor en lugar de usar una asignación dinámica (DHCP). Esta co**nfiguración es opcional y sol**o está disponible si se elige esta opción en el menú. Está hecho para Ubuntu 24, probablemente si se utiliza otra distribución no funcione. Se solicitan los siguientes datos:
+Permite establecer una dirección IP fija en el servidor en lugar de usar una asignación dinámica (DHCP). Esta configuración es opcional y solo está disponible si se elige esta opción en el menú. Se solicitan los siguientes datos:
 
 - Dirección IP
 - Máscara de subred
 - Puerta de enlace
 
 El script genera un archivo de configuración en `/etc/netplan/01-netcfg.yaml` y aplica los cambios mediante `netplan apply`.
+
+**Importante:** Actualmente, este script ha sido probado únicamente en Ubuntu 24. No se garantiza su funcionamiento en otras distribuciones de Linux, ya que los archivos de configuración de red pueden diferir en nombre y estructura.
 
 ### 2. Configurar Servidor de Seguridad (fail2ban)
 
@@ -91,4 +93,3 @@ sudo ./script_instalacion.sh
 - Los logs del proceso se almacenan en `/var/log/server_setup.log`.
 
 Este script proporciona una solución automatizada para la configuración inicial de servidores Linux, permitiendo personalización avanzada y seguridad desde el inicio.
-
